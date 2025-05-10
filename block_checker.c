@@ -1,70 +1,6 @@
 #include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
 #include <string.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
-
-
-#define BLOCK_SIZE 4096
-#define TOTAL_BLOCKS 64
-#define INODE_SIZE 256
-#define INODE_COUNT (5 * BLOCK_SIZE / INODE_SIZE) 
-#define MAGIC_NUMBER 0xD34D
-#define SUPERBLOCK_SIZE 4096
-#define BITMAP_SIZE (BLOCK_SIZE / 8) 
-#define DATA_BLOCK_START 8
-#define INODE_TABLE_START 3
-#define INODE_TABLE_BLOCKS 5
-
-typedef struct {
-    uint16_t magic;
-    uint32_t block_size;
-    uint32_t total_blocks;
-    uint32_t inode_bitmap_block;
-    uint32_t data_bitmap_block;
-    uint32_t inode_table_start;
-    uint32_t first_data_block;
-    uint32_t inode_size;
-    uint32_t inode_count;
-    uint8_t reserved[4058];
-} Superblock;
-
-typedef struct {
-    uint32_t mode;
-    uint32_t uid;
-    uint32_t gid;
-    uint32_t size;
-    uint32_t atime;
-    uint32_t ctime;
-    uint32_t mtime;
-    uint32_t dtime;
-    uint32_t links;
-    uint32_t blocks;
-    uint32_t direct[1]; 
-    uint32_t single_indirect;
-    uint32_t double_indirect;
-    uint32_t triple_indirect;
-    uint8_t reserved[156];
-} Inode;
-
-uint8_t *fs_image;
-size_t fs_size;
-int errors_found = 0;
-int fixes_applied = 0;
-
-int get_bit(uint8_t *bitmap, uint32_t index) {
-    return (bitmap[index / 8] >> (index % 8)) & 1;
-}
-
-void set_bit(uint8_t *bitmap, uint32_t index, int value) {
-    if (value)
-        bitmap[index / 8] |= (1 << (index % 8));
-    else
-        bitmap[index / 8] &= ~(1 << (index % 8));
-}
+#include "vsfsck.h"
 
 void check_superblock(Superblock *sb, int fix) {
     printf("Checking superblock...\n");
@@ -182,7 +118,8 @@ void check_data_bitmap(uint8_t *data_bitmap, Inode *inode_table, int fix) {
     printf("Checking data bitmap...\n");
     uint8_t computed_bitmap[BITMAP_SIZE] = {0};
     uint32_t block_counts[TOTAL_BLOCKS] = {0};
-
+    uint32_t first_inode_for_block[TOTAL_BLOCKS] = {0}; 
+    
     for (uint32_t i = 0; i < DATA_BLOCK_START; i++) {
         set_bit(computed_bitmap, i, 1);
         block_counts[i]++;
@@ -193,19 +130,48 @@ void check_data_bitmap(uint8_t *data_bitmap, Inode *inode_table, int fix) {
         if (inode->links == 0 || inode->dtime != 0) continue;
         if (inode->direct[0] >= DATA_BLOCK_START && inode->direct[0] < TOTAL_BLOCKS) {
             block_counts[inode->direct[0]]++;
-            set_bit(computed_bitmap, inode->direct[0], 1);
+            if (block_counts[inode->direct[0]] == 1) {
+                first_inode_for_block[inode->direct[0]] = i; 
+            }
         }
     }
+
 
     for (uint32_t i = DATA_BLOCK_START; i < TOTAL_BLOCKS; i++) {
         if (block_counts[i] > 1) {
             printf("Error: Data block %u referenced %u times\n", i, block_counts[i]);
             errors_found++;
             if (fix) {
-                printf("Fix not implemented: Duplicate block %u\n", i);
-                fixes_applied++;
+                for (uint32_t j = 0; j < INODE_COUNT; j++) {
+                    Inode *inode = &inode_table[j];
+                    if (inode->links == 0 || inode->dtime != 0) continue;
+                    if (inode->direct[0] == i && j != first_inode_for_block[i]) {
+                        inode->direct[0] = 0;
+                        inode->blocks = 0;
+                        inode->size = 0; 
+                        printf("Fixed: Cleared duplicate reference to block %u in inode %u\n", i, j);
+                        fixes_applied++;
+                    }
+                }
+                block_counts[i] = 1; 
             }
         }
+    }
+
+
+    memset(computed_bitmap, 0, BITMAP_SIZE);
+    for (uint32_t i = 0; i < DATA_BLOCK_START; i++) {
+        set_bit(computed_bitmap, i, 1);
+    }
+    for (uint32_t i = 0; i < INODE_COUNT; i++) {
+        Inode *inode = &inode_table[i];
+        if (inode->links == 0 || inode->dtime != 0) continue;
+        if (inode->direct[0] >= DATA_BLOCK_START && inode->direct[0] < TOTAL_BLOCKS) {
+            set_bit(computed_bitmap, inode->direct[0], 1);
+        }
+    }
+
+    for (uint32_t i = DATA_BLOCK_START; i < TOTAL_BLOCKS; i++) {
         int bitmap_bit = get_bit(data_bitmap, i);
         int computed_bit = get_bit(computed_bitmap, i);
         if (bitmap_bit && !computed_bit) {
@@ -236,76 +202,10 @@ void check_data_bitmap(uint8_t *data_bitmap, Inode *inode_table, int fix) {
             if (fix) {
                 inode->direct[0] = 0;
                 inode->blocks = 0;
+                inode->size = 0; 
                 printf("Fixed: Cleared invalid block reference in inode %u\n", i);
                 fixes_applied++;
             }
         }
     }
-}
-
-void check_filesystem(int fix) {
-    errors_found = 0;
-    fixes_applied = 0;
-
-    Superblock *sb = (Superblock *)fs_image;
-    uint8_t *inode_bitmap = fs_image + BLOCK_SIZE;
-    uint8_t *data_bitmap = fs_image + 2 * BLOCK_SIZE;
-    Inode *inode_table = (Inode *)(fs_image + INODE_TABLE_START * BLOCK_SIZE);
-
-    check_superblock(sb, fix);
-    check_inode_bitmap(inode_bitmap, inode_table, fix);
-    check_data_bitmap(data_bitmap, inode_table, fix);
-}
-
-int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <vsfs.img>\n", argv[0]);
-        return 1;
-    }
-
-    int fd = open(argv[1], O_RDWR);
-    if (fd < 0) {
-        perror("Failed to open filesystem image");
-        return 1;
-    }
-
-    struct stat st;
-    if (fstat(fd, &st) < 0) {
-        perror("Failed to stat filesystem image");
-        close(fd);
-        return 1;
-    }
-    fs_size = st.st_size;
-    if (fs_size < TOTAL_BLOCKS * BLOCK_SIZE) {
-        fprintf(stderr, "Filesystem image too small\n");
-        close(fd);
-        return 1;
-    }
-
-    fs_image = mmap(NULL, fs_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (fs_image == MAP_FAILED) {
-        perror("Failed to mmap filesystem image");
-        close(fd);
-        return 1;
-    }
-
-    printf("First pass: Checking and fixing filesystem...\n");
-    check_filesystem(1);
-    printf("First pass complete: %d errors found, %d fixes applied\n", errors_found, fixes_applied);
-
-    if (msync(fs_image, fs_size, MS_SYNC) < 0) {
-        perror("Failed to sync filesystem image");
-    }
-
-    printf("\nSecond pass: Verifying filesystem...\n");
-    check_filesystem(0);
-    if (errors_found == 0) {
-        printf("Second pass complete: Filesystem is error-free\n");
-    } else {
-        printf("Second pass complete: %d errors remain\n", errors_found);
-    }
-
-    munmap(fs_image, fs_size);
-    close(fd);
-    return errors_found ? 1 : 0;
 }

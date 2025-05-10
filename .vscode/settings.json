@@ -1,0 +1,8 @@
+{
+    "C_Cpp.default.compilerPath": "/usr/bin/gcc",
+    "files.associations": {
+        "*.embeddedhtml": "html",
+        "mman.h": "c",
+        "fcntl.h": "c"
+    }
+}
