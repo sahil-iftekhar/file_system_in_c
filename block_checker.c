@@ -87,6 +87,13 @@ void check_superblock(Superblock *sb, int fix) {
     }
 }
 
+
+// Inode 0: links = 1, dtime = 0 (valid, active file).
+// Inode 1: links = 0, dtime = 123456 (invalid, deleted).
+// Inode 2: links = 2, dtime = 0 (valid, directory with 2 links).
+// Inode 3: links = 0, dtime = 0 (invalid, no links).
+
+// bitmap: [1100]
 void check_inode_bitmap(uint8_t *inode_bitmap, Inode *inode_table, int fix) {
     printf("Checking inode bitmap...\n");
     for (uint32_t i = 0; i < INODE_COUNT; i++) {
@@ -113,6 +120,16 @@ void check_inode_bitmap(uint8_t *inode_bitmap, Inode *inode_table, int fix) {
         }
     }
 }
+
+//INODE_COUNT = 5, TOTAL_BLOCKS = 1000, DATA_BLOCK_START = 100, BITMAP_SIZE = 125
+
+// Inode 0: links = 1, dtime = 0, direct[0] = 200 (valid).
+// Inode 1: links = 0, dtime = 123456 (invalid).
+// Inode 2: links = 2, dtime = 0, direct[0] = 200 (valid, but duplicates inode 0).
+// Inode 3: links = 1, dtime = 0, direct[0] = 300 (valid).
+// Inode 4: links = 1, dtime = 0, direct[0] = 9999 (invalid block).
+
+// bitmap [10100]
 
 void check_data_bitmap(uint8_t *data_bitmap, Inode *inode_table, int fix) {
     printf("Checking data bitmap...\n");
